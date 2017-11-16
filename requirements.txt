@@ -1,0 +1,6 @@
+pip install bcrypt
+pip install futures
+pip install urllib
+pip install pymongo
+pip install tornado
+pip install pyjwt

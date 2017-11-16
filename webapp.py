@@ -152,12 +152,12 @@ class RegisterHandler(BaseHandler):
       form_data = tornado.escape.json_decode(self.request.body)
     except:
       self.write("Invalid Form data format, only support JSON\n")
-
+      return
     ### Check user name dup
     user_account_db_data=self.user_account_db.find_one({'user_name':form_data['user_name']})
     if(not user_account_db_data==None):
       self.write("User name exists")
-
+      return
     #create hashed password
     hashed_password = yield executor.submit(
       bcrypt.hashpw, tornado.escape.utf8(form_data["password"]),

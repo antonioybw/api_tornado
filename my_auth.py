@@ -30,7 +30,7 @@ def encode_auth_token(user_name):
     """
     try:
         payload = {
-            'exp': datetime.datetime.utcnow() + datetime.timedelta(days=0,hours=1,seconds=0),
+            'exp': datetime.datetime.utcnow() + datetime.timedelta(days=0,hours=2,seconds=0),
             'iat': datetime.datetime.utcnow(),
             'user_name': user_name
         }
@@ -122,7 +122,6 @@ def jwtauth(handler_class):
 
 
 
-
 def decode_auth_token(auth_token):
     """
     Decodes the auth token
@@ -131,8 +130,14 @@ def decode_auth_token(auth_token):
     """
     try:
         payload = jwt.decode(auth_token, SECRET_KEY)
-        return payload
+        return {'user_name':payload['user_name']}
     except jwt.ExpiredSignatureError:
         return 'Signature expired. Please log in again.'
     except jwt.InvalidTokenError:
         return 'Invalid token. Please log in again.'
+
+def extract_user(request):
+    token=request.headers.get('Authorization').split()[1]
+    payload=decode_auth_token(token)
+    return payload
+

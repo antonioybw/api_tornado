@@ -10,6 +10,9 @@ from tornado import gen
 import uuid  
 import my_auth
 from my_auth import jwtauth
+import os
+import datetime
+import json
 
 from tornado.options import define, options
 
@@ -23,7 +26,7 @@ executor = concurrent.futures.ThreadPoolExecutor()
 #debug flag
 DEBUG = options.debug
 
-
+__UPLOADS__ = "/root/workspace/webapp_tornado/static/"
 
 
 class Application(tornado.web.Application):
@@ -33,10 +36,15 @@ class Application(tornado.web.Application):
       (r"/register", RegisterHandler),
       (r"/check", CheckTokenHandler),
       (r"/login", LoginHandler),
+      (r"/logout", LogoutHandler),
       (r"/get_user", UserHandler),
       (r"/logout", LogoutHandler),
+      (r"/upload", UploadHandler),
+      (r"/user_contents", UserContentsHandler),
+      (r"/delete", DeleteFileHandler),
       (r"/api/v1/read_db/?", DBHandler),
-      (r"/api/v1/insert_db/[0-9][0-9][0-9][0-9]/?", DBHandler)
+      (r"/api/v1/insert_db/[0-9][0-9][0-9][0-9]/?", DBHandler),
+      (r"/static_content/(.*)", tornado.web.StaticFileHandler, {"path": "/root/workspace/webapp_tornado/static"}),
     ]
 
     settings = dict(
@@ -50,15 +58,15 @@ class Application(tornado.web.Application):
     self.user_db_client = MongoClient("mongodb://%s:%s@%s/user_db"%(user_db_username, user_db_password,options.mongodb),connect=False)
     self.user_db= self.user_db_client.user_db
     self.user_account=self.user_db.user_account
-    self.user_to_face=self.user_db.user_to_face
+    self.user_contents=self.user_db.user_contents
 
 class BaseHandler(tornado.web.RequestHandler):
   @property
   def user_account_db(self):
     return self.application.user_account
   @property
-  def user_to_face_db(self):
-    return self.application.user_to_face
+  def user_contents_db(self):
+    return self.application.user_contents
 
   def get_current_user(self):
     return self.get_secure_cookie("user")
@@ -76,8 +84,8 @@ class UserHandler(BaseHandler):
 
 class LogoutHandler(BaseHandler):
   def get(self):
-    self.clear_cookie("user")
-    # self.redirect(self.get_argument("next", "/"))
+    self.write("Clear Token")
+
 
 @jwtauth
 class CheckTokenHandler(BaseHandler):
@@ -105,11 +113,13 @@ class CheckTokenHandler(BaseHandler):
 class LoginHandler(BaseHandler):
   @gen.coroutine
   def post(self):
+    ### Validate data format
     try:
       form_data = tornado.escape.json_decode(self.request.body)
     except:
       self.write("Invalid Form data format, only support JSON\n")
 
+    ### Retrieve data from DB
     try:
       user_account_db_data=self.user_account_db.find_one({'user_name':form_data['user_name']});
       if(user_account_db_data==None):
@@ -117,13 +127,11 @@ class LoginHandler(BaseHandler):
         return
       user_input_pw=form_data["password"]
       user_db_pw=user_account_db_data['password']
-      print user_input_pw
-      print "db hashed password"
-      print user_db_pw
     except:
       print "error in user account insert"
       self.write("Error in login to DB")
       return
+
     #since the salt is stored in the hashed password, so we hashpw it again using hashed pass
     hashed_password = yield executor.submit(
       bcrypt.hashpw, tornado.escape.utf8(user_input_pw),
@@ -181,14 +189,15 @@ class RegisterHandler(BaseHandler):
     #prepare three list db create
     new_face_list={
       "user_name"           : form_data['user_name'],
-      "face_doc_id"         : form_data['face_doc_id'],
+      "videos"              : [],
+      "images"              : [],
       "white_list"          : [],
       "black_list"          : [],
       "unknown_list"        : [],
       "user_FC_collection"  : form_data['user_FC_collection']
     }
     try:
-      self.user_to_face_db.insert_one(new_face_list)
+      self.user_contents_db.insert_one(new_face_list)
     except:
       print "error in user_to_face insert"
       self.write("Error in register to DB")
@@ -229,22 +238,98 @@ class DBHandler(BaseHandler):
     except:
       self.write("Error in getting from DB")
 
-# class LoginHandler(BaseHandler):
-#   def post(self):
-#     try:
-#       all_user=self.application.user_account.find()
-#       self.write("Hello ,with mongo ,user data")
-#       for c in all_user:
-#         self.write("<br/>")
-#         self.write(c["user_name"])
-#         self.write(' at email: ' + c["email"])
-#     except:
-#       self.write("Error in getting from DB")
+@jwtauth
+class UploadHandler(BaseHandler):
+  def post(self):
+    user_name_dict=my_auth.extract_user(self.request)
+    if isinstance(user_name_dict, str):
+      self.finish(user_name_dict)
+      return
+    user_name=user_name_dict['user_name']
+    try:
+      fileinfo = self.request.files['file'][0]
+      fname = fileinfo['filename']
+      extn = os.path.splitext(fname)[1]
+      file_type="images"
+      if extn == '.jpg' or extn == '.png' :
+        file_type="images"
+      elif extn == '.mp4' or extn == '.avi' :
+        file_type="videos"
+      else:
+        self.finish("file format not supported")
+        return
+      cname = str(uuid.uuid4()) + extn
+      f_path=__UPLOADS__ + 'user_contents/'+user_name+'/'+file_type+'/'
+      
+      if not os.path.exists(f_path):
+        os.makedirs(f_path)
+      f_url=f_path+cname
+      relative_path='user_contents/'+user_name+'/'+file_type+'/'+cname
+      fh = open(f_url, 'w+')
+      fh.write(fileinfo['body'])
+      
+      self.user_contents_db.update_one({"user_name":user_name},
+        {"$push":
+          {file_type:
+            {"url":f_url, "datetime":datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),"tag":[] }
+          }
+        })
+    except:
+      self.finish('Internal upload DB error')
+      return
+    remote_url="http://50.227.54.146:15010/static_content/"+relative_path
+    self.finish(cname + " is uploaded! Check url >> %s" %remote_url)
 
 
+@jwtauth
+class UserContentsHandler(BaseHandler):
+  def get(self):
+    user_name_dict=my_auth.extract_user(self.request)
+    if isinstance(user_name_dict, str):
+      self.finish(user_name_dict)
+      return
+    user_name=user_name_dict['user_name']
+    print "current user:"
+    print user_name
+    try:
+      user_res=self.user_contents_db.find_one({"user_name":user_name})
+    except:
+      self.finish('Access DB error')
+      return
+    del(user_res['_id'])
+    self.finish(json.dumps(user_res))
 
+@jwtauth
+class DeleteFileHandler(BaseHandler):
+  def post(self):
+    user_name_dict=my_auth.extract_user(self.request)
+    if isinstance(user_name_dict, str):
+      self.finish(user_name_dict)
+      return
+    user_name=user_name_dict['user_name']
+    print "current user:"
+    print user_name
 
-
+    ### Validate data format
+    try:
+      form_data = tornado.escape.json_decode(self.request.body)
+    except:
+      self.write("Invalid Form data format, only support JSON\n")
+      return
+    file_type=form_data["file_type"]
+    file_url=form_data["file_url"]
+    try:
+      user_res=self.user_contents_db.update_one({"user_name":user_name},
+        {"$pull":
+          {file_type:
+            {"url":file_url}
+          }
+        })
+    except:
+      self.finish('Access DB error')
+      return
+    os.remove(file_url)
+    self.finish("delete success")
 
 # def make_app():
 #   return tornado.web.Application([

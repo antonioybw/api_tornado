@@ -13,6 +13,13 @@ from my_auth import jwtauth
 import os
 import datetime
 import json
+import my_util
+import time 
+import base64
+import subprocess
+
+from my_util import error_response 
+from my_util import success_response
 
 from tornado.options import define, options
 
@@ -25,6 +32,8 @@ executor = concurrent.futures.ThreadPoolExecutor()
 
 #debug flag
 DEBUG = options.debug
+
+
 
 __UPLOADS__ = "/root/workspace/webapp_tornado/static/"
 
@@ -40,6 +49,12 @@ class Application(tornado.web.Application):
       (r"/get_user", UserHandler),
       (r"/logout", LogoutHandler),
       (r"/upload", UploadHandler),
+      (r"/test", TestHandler),
+      (r"/setCover", SetCoverHandler),
+      (r"/asset_upload", AssetUploadHandler),
+      (r"/display", FCHandler),
+      (r"/refresh", RefreshHandler),
+      (r"/more", MoreHandler),
       (r"/user_contents", UserContentsHandler),
       (r"/delete", DeleteFileHandler),
       (r"/api/v1/read_db/?", DBHandler),
@@ -117,19 +132,19 @@ class LoginHandler(BaseHandler):
     try:
       form_data = tornado.escape.json_decode(self.request.body)
     except:
-      self.write("Invalid Form data format, only support JSON\n")
+      self.write(error_response("Invalid Form data format, only support JSON\n"))
 
     ### Retrieve data from DB
     try:
       user_account_db_data=self.user_account_db.find_one({'user_name':form_data['user_name']});
       if(user_account_db_data==None):
-        self.write("User name cannot be found")
+        self.write(error_response("User name cannot be found"))
         return
       user_input_pw=form_data["password"]
       user_db_pw=user_account_db_data['password']
     except:
       print "error in user account insert"
-      self.write("Error in login to DB")
+      self.write(error_response("Error in login to DB"))
       return
 
     #since the salt is stored in the hashed password, so we hashpw it again using hashed pass
@@ -142,12 +157,15 @@ class LoginHandler(BaseHandler):
       new_token=my_auth.encode_auth_token(form_data['user_name'])
       if isinstance(new_token, str):
         response['token']=new_token
-        self.write(response)
+        response['user_name']=user_account_db_data['user_name']
+        response['email']=user_account_db_data['email']
+        # time.sleep(5)
+        self.write(success_response(response))
       else:
-        self.write("Internal Server Error")
+        self.write(error_response("Internal Server Error"))
     else:
       # password not match
-      self.write("Password Incorrect")
+      self.write(error_response("Password Incorrect"))
 
 class RegisterHandler(BaseHandler):
   @gen.coroutine
@@ -159,12 +177,12 @@ class RegisterHandler(BaseHandler):
     try:
       form_data = tornado.escape.json_decode(self.request.body)
     except:
-      self.write("Invalid Form data format, only support JSON\n")
+      self.write(error_response("Invalid Form data format, only support JSON\n"))
       return
     ### Check user name dup
     user_account_db_data=self.user_account_db.find_one({'user_name':form_data['user_name']})
     if(not user_account_db_data==None):
-      self.write("User name exists")
+      self.write(error_response("User name exists"))
       return
     #create hashed password
     hashed_password = yield executor.submit(
@@ -183,7 +201,7 @@ class RegisterHandler(BaseHandler):
       self.user_account_db.insert_one(form_data)
     except:
       print "error in user account insert"
-      self.write("Error in register to DB")
+      self.write(error_response("Error in register to DB"))
       return
 
     #prepare three list db create
@@ -200,7 +218,7 @@ class RegisterHandler(BaseHandler):
       self.user_contents_db.insert_one(new_face_list)
     except:
       print "error in user_to_face insert"
-      self.write("Error in register to DB")
+      self.write(error_response("Error in register to DB"))
       return
 
     #prepare http api response
@@ -209,9 +227,9 @@ class RegisterHandler(BaseHandler):
     new_token=my_auth.encode_auth_token(form_data['user_name'])
     if isinstance(new_token, str):
       response['token']=new_token
-      self.write(response)
+      self.write(success_response(response))
     else:
-      self.write("Internal Server Error")
+      self.write(error_response("Internal Server Error"))
 
 
 class MainHandler(BaseHandler):
@@ -258,22 +276,35 @@ class UploadHandler(BaseHandler):
       else:
         self.finish("file format not supported")
         return
-      cname = str(uuid.uuid4()) + extn
+      file_id= user_name+'*'+str(uuid.uuid4())
+      cname =  file_id + extn
       f_path=__UPLOADS__ + 'user_contents/'+user_name+'/'+file_type+'/'
       
       if not os.path.exists(f_path):
         os.makedirs(f_path)
       f_url=f_path+cname
       relative_path='user_contents/'+user_name+'/'+file_type+'/'+cname
-      fh = open(f_url, 'w+')
-      fh.write(fileinfo['body'])
+      with open(f_url, 'w+') as fh:
+        fh.write(fileinfo['body'])
+      
       
       self.user_contents_db.update_one({"user_name":user_name},
         {"$push":
           {file_type:
-            {"url":f_url, "datetime":datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),"tag":[] }
+            { "url":f_url, 
+              "file_id":file_id,
+              "created_at":datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+              "tag":[],
+              "person_id":[],
+              "text": "",
+              "original_pic": "",
+              "original_video": "http://50.227.54.146:15010/static_content/"+relative_path,
+              "zipcode": ""
+              }
           }
         })
+
+      subprocess.call("scp -P 1122 "+f_url+" ubuntu@184.105.242.130:/tmp/vms/",shell=True)
     except:
       self.finish('Internal upload DB error')
       return
@@ -286,7 +317,7 @@ class UserContentsHandler(BaseHandler):
   def get(self):
     user_name_dict=my_auth.extract_user(self.request)
     if isinstance(user_name_dict, str):
-      self.finish(user_name_dict)
+      self.write(error_response(user_name_dict))
       return
     user_name=user_name_dict['user_name']
     print "current user:"
@@ -294,10 +325,10 @@ class UserContentsHandler(BaseHandler):
     try:
       user_res=self.user_contents_db.find_one({"user_name":user_name})
     except:
-      self.finish('Access DB error')
+      self.write(error_response('Access DB error'))
       return
     del(user_res['_id'])
-    self.finish(json.dumps(user_res))
+    self.write(success_response(user_res))
 
 @jwtauth
 class DeleteFileHandler(BaseHandler):
@@ -331,10 +362,159 @@ class DeleteFileHandler(BaseHandler):
     os.remove(file_url)
     self.finish("delete success")
 
+
+send_data=my_util.get_refresh()
+
+#send_data={
+#    "err_code": 0,
+#    "err_msg": "success",
+#    "data": [
+#
+#        {
+#            "id": "1",
+#            "nickname":"Weixin Wu",
+#            "avatar":"1",
+#            "text": "1. Yo!!Behind every successful man there's a lot u unsuccessful years. https://www.google.com/",
+#            "original_pic": "https://i.ytimg.com/vi/bNQsTIkGw44/maxresdefault.jpg",
+#            "original_video": "http://50.227.54.146:15010/static_content/clipPreview(1).mp4",
+#            "created_at": my_util.get_time_label()
+#        },
+#
+#        {
+#            "id": "2",
+#            "nickname":"Weixin Wu",
+#            "avatar":"1",
+#            "text": "2. Yo!!Behind every successful man there's a lot u unsuccessful years. https://www.google.com/",
+#            "original_pic": "https://i.ytimg.com/vi/bNQsTIkGw44/maxresdefault.jpg",
+#            "original_video": "http://50.227.54.146:15010/static_content/clipPreview(2).mp4",
+#            "created_at": my_util.get_time_label()
+#        },
+#
+#        {
+#            "id": "41",
+#            "nickname":"Weixin Wu",
+#            "avatar":"1",
+#            "text": "3. Yo!!Behind every successful man there's a lot u unsuccessful years. https://www.google.com/",
+#            "original_pic": "https://i.ytimg.com/vi/bNQsTIkGw44/maxresdefault.jpg",
+#            "original_video": "http://50.227.54.146:15010/static_content/clipPreview(3).mp4",
+#            "created_at": my_util.get_time_label()
+#        },
+#
+#        {
+#            "id": "41",
+#            "nickname":"Weixin Wu",
+#            "avatar":"1",
+#            "text": "4. Yo!!Behind every successful man there's a lot u unsuccessful years. https://www.google.com/",
+#            "original_pic": "https://i.ytimg.com/vi/bNQsTIkGw44/maxresdefault.jpg",
+#            "original_video": "http://50.227.54.146:15010/static_content/clipPreview(4).mp4",
+#            "created_at": my_util.get_time_label()
+#        }
+#
+#        ]
+#    }
+
+
+
+
+
+
+class FCHandler(BaseHandler):
+  def get(self):
+    self.write(json.dumps(send_data))
+  def post(self):
+    # directly get all request body data as a dict
+    data = tornado.escape.json_decode(self.request.body)
+    # or can access a dict value by self.get_body_argument("message"), if the body has a key "message"
+    print "received post data:"
+    print data
+
+class RefreshHandler(BaseHandler):
+  def get(self):
+    self.write(json.dumps(my_util.get_refresh()))
+
+
+class MoreHandler(BaseHandler):
+  def get(self):
+    self.write(json.dumps(my_util.get_refresh()))
 # def make_app():
 #   return tornado.web.Application([
 #     (r"/", MainHandler),
 #   ])
+
+
+class AssetUploadHandler(BaseHandler):
+  def post(self):
+    try:
+      form_data = tornado.escape.json_decode(self.request.body)
+    except:
+      self.write(error_response("Invalid Form data format, only support JSON\n"))
+
+    try:
+      b64_imgstr=form_data['data']
+      filename=str(uuid.uuid4())+'.png'
+      with open(__UPLOADS__+filename,'w+') as upf:
+        upf.write(base64.b64decode(b64_imgstr))
+    except:
+      self.write(error_response('Internal upload DB error'))
+      return
+    remote_url="http://50.227.54.146:15010/static_content/"+filename
+    self.write(success_response({'resp': " file is uploaded! Check url >> %s" %remote_url}))
+
+
+class TestHandler(BaseHandler):
+  def get(self):
+    # try:
+    self.user_contents_db.update_one({"user_name":"weixin", "videos.url":"/root/workspace/webapp_tornado/static/ufefsgfsefeser_contents/weixin/videos/4e2e14c9-4116-48bf-b5d9-c198651be1dd.mp4"},
+      {"$set":
+        {"videos.$.original_pic":"test_change"
+        }
+      })
+    # except:
+    #   self.finish('Internal upload DB error')
+    #   return
+    self.finish(success_response("success"))
+
+class SetCoverHandler(BaseHandler):
+  def post(self):
+    try:
+      print "get set cover request"
+      fileinfo = self.request.files['file'][0]
+      fname = self.request.headers.get('cover_image_name')
+
+      print "filename:"
+      print fname
+      file_id,extn = os.path.splitext(fname)
+      star_idx=fname.rfind('*')
+      user_name=fname[0:star_idx]
+      file_type="cover_images"
+      f_path=__UPLOADS__ + 'user_contents/'+user_name+'/'+file_type+'/'
+      print "username:"
+      print user_name
+      if not os.path.exists(f_path):
+        os.makedirs(f_path)
+      f_url=f_path+fname
+      print "after create path:"
+
+      relative_path='user_contents/'+user_name+'/'+file_type+'/'+fname
+      with open(f_url, 'w+') as fh:
+        fh.write(fileinfo['body'])
+
+      self.user_contents_db.update_one({"user_name":user_name, "videos.file_id":file_id},
+        {"$set":
+          {"videos.$.original_pic": "http://50.227.54.146:15010/static_content/"+relative_path,
+          }
+      })
+
+      print "settting db"
+    except:
+      self.finish('Internal upload DB error')
+      return
+    remote_url="http://50.227.54.146:15010/static_content/"+relative_path
+    self.finish(success_response("Cover image is uploaded! Check url >> %s" %remote_url))
+
+
+
+
 
 def main():
   tornado.options.parse_command_line()

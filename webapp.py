@@ -18,6 +18,8 @@ import time
 import base64
 import subprocess
 
+from avatar_generator import Avatar
+
 from my_util import error_response 
 from my_util import success_response
 
@@ -52,11 +54,14 @@ class Application(tornado.web.Application):
       (r"/test", TestHandler),
       (r"/setCover", SetCoverHandler),
       (r"/asset_upload", AssetUploadHandler),
+      (r"/video_upload", VideoUploadHandler),
       (r"/display", FCHandler),
       (r"/refresh", RefreshHandler),
+      (r"/comments", CommentsHandler),
       (r"/more", MoreHandler),
       (r"/user_contents", UserContentsHandler),
       (r"/delete", DeleteFileHandler),
+      (r"/delete_all", DeleteAllHandler),
       (r"/api/v1/read_db/?", DBHandler),
       (r"/api/v1/insert_db/[0-9][0-9][0-9][0-9]/?", DBHandler),
       (r"/static_content/(.*)", tornado.web.StaticFileHandler, {"path": "/root/workspace/webapp_tornado/static"}),
@@ -136,14 +141,20 @@ class LoginHandler(BaseHandler):
 
     ### Retrieve data from DB
     try:
-      user_account_db_data=self.user_account_db.find_one({'user_name':form_data['user_name']});
+      user_account_db_data=self.user_account_db.find_one({'user_name':form_data['user_name']})
       if(user_account_db_data==None):
         self.write(error_response("User name cannot be found"))
         return
       user_input_pw=form_data["password"]
       user_db_pw=user_account_db_data['password']
+
+      user_contents_db_data=self.user_contents_db.find_one({'user_name':form_data['user_name']})
+      if 'avatar' in user_contents_db_data:
+        ava_url=user_contents_db_data['avatar']
+      else:
+        ava_url='http://lorempixel.com/68/68/people/7/'
     except:
-      print "error in user account insert"
+      print "error in access DB"
       self.write(error_response("Error in login to DB"))
       return
 
@@ -159,6 +170,7 @@ class LoginHandler(BaseHandler):
         response['token']=new_token
         response['user_name']=user_account_db_data['user_name']
         response['email']=user_account_db_data['email']
+        response['avatar']=ava_url
         # time.sleep(5)
         self.write(success_response(response))
       else:
@@ -204,17 +216,30 @@ class RegisterHandler(BaseHandler):
       self.write(error_response("Error in register to DB"))
       return
 
-    #prepare three list db create
-    new_face_list={
-      "user_name"           : form_data['user_name'],
-      "videos"              : [],
-      "images"              : [],
-      "white_list"          : [],
-      "black_list"          : [],
-      "unknown_list"        : [],
-      "user_FC_collection"  : form_data['user_FC_collection']
-    }
+    ## create user contents block
     try:
+      avatar = Avatar.generate(128, form_data['user_name'])
+      create_path=__UPLOADS__ + 'user_contents/'+form_data['user_name']+'/avatar/'
+      if not os.path.exists(create_path):
+        os.makedirs(create_path)
+      ava_relative_path='user_contents/'+form_data['user_name']+'/avatar/'+form_data['user_name']+'_avatar.jpg'
+      ava_path=__UPLOADS__ + ava_relative_path
+      with open(ava_path, 'w+') as fh:
+          fh.write(avatar)
+      #prepare three list db create
+      ava_url="http://50.227.54.146:15010/static_content/"+ava_relative_path
+      new_face_list={
+        "user_name"           : form_data['user_name'],
+        "avatar"              : ava_url,
+        "assets"              : [],
+        "videos"              : [],
+        "images"              : [],
+        "white_list"          : [],
+        "black_list"          : [],
+        "unknown_list"        : [],
+        "user_FC_collection"  : form_data['user_FC_collection'],
+        "like_list"           : {}
+      }
       self.user_contents_db.insert_one(new_face_list)
     except:
       print "error in user_to_face insert"
@@ -227,6 +252,9 @@ class RegisterHandler(BaseHandler):
     new_token=my_auth.encode_auth_token(form_data['user_name'])
     if isinstance(new_token, str):
       response['token']=new_token
+      response['user_name']=form_data['user_name']
+      response['email']=form_data['email']
+      response['avatar']=ava_url
       self.write(success_response(response))
     else:
       self.write(error_response("Internal Server Error"))
@@ -264,50 +292,64 @@ class UploadHandler(BaseHandler):
       self.finish(user_name_dict)
       return
     user_name=user_name_dict['user_name']
-    try:
-      fileinfo = self.request.files['file'][0]
-      fname = fileinfo['filename']
-      extn = os.path.splitext(fname)[1]
-      file_type="images"
-      if extn == '.jpg' or extn == '.png' :
-        file_type="images"
-      elif extn == '.mp4' or extn == '.avi' :
-        file_type="videos"
-      else:
-        self.finish("file format not supported")
-        return
-      file_id= user_name+'*'+str(uuid.uuid4())
-      cname =  file_id + extn
-      f_path=__UPLOADS__ + 'user_contents/'+user_name+'/'+file_type+'/'
-      
-      if not os.path.exists(f_path):
-        os.makedirs(f_path)
-      f_url=f_path+cname
-      relative_path='user_contents/'+user_name+'/'+file_type+'/'+cname
-      with open(f_url, 'w+') as fh:
-        fh.write(fileinfo['body'])
-      
-      
-      self.user_contents_db.update_one({"user_name":user_name},
-        {"$push":
-          {file_type:
-            { "url":f_url, 
-              "file_id":file_id,
-              "created_at":datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-              "tag":[],
-              "person_id":[],
-              "text": "",
-              "original_pic": "",
-              "original_video": "http://50.227.54.146:15010/static_content/"+relative_path,
-              "zipcode": ""
-              }
-          }
-        })
 
-      subprocess.call("scp -P 1122 "+f_url+" ubuntu@184.105.242.130:/tmp/vms/",shell=True)
-    except:
-      self.finish('Internal upload DB error')
+    # try:
+    fileinfo = self.request.files['file'][0]
+    fname = fileinfo['filename']
+    print "got file"
+    print fileinfo
+    print fname
+    extn = os.path.splitext(fname)[1]
+    file_type="images"
+
+    if extn == '.jpg' or extn == '.png' :
+      file_type="images"
+    elif extn == '.mp4' or extn == '.avi' :
+      file_type="videos"
+    else:
+      self.finish("file format not supported")
       return
+    file_id= user_name+'*'+str(uuid.uuid4())
+    cname =  file_id + extn
+    f_path=__UPLOADS__ + 'user_contents/'+user_name+'/'+file_type+'/'
+    
+    if not os.path.exists(f_path):
+      os.makedirs(f_path)
+    f_url=f_path+cname
+    relative_path='user_contents/'+user_name+'/'+file_type+'/'+cname
+    with open(f_url, 'w+') as fh:
+      fh.write(fileinfo['body'])
+    
+    original_pic_url = ""
+    original_video_url = ""
+    if file_type=="images":
+      original_pic_url = "http://50.227.54.146:15010/static_content/"+relative_path
+    else:
+      original_video_url = "http://50.227.54.146:15010/static_content/"+relative_path
+
+    contents=self.user_contents_db.find_one({"user_name":user_name})
+    
+    self.user_contents_db.update_one({"user_name":user_name},
+      {"$push":
+        {"assets":
+          { "url":f_url, 
+            "avatar": contents['avatar'],
+            "file_id":file_id,
+            "created_at":datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "tag":[],
+            "person_id":[],
+            "text": "",
+            "original_pic": original_pic_url,
+            "original_video": original_video_url,
+            "zipcode": ""
+            }
+        }
+      })
+    if file_type=="videos":
+      subprocess.call("scp -P 1122 "+f_url+" ubuntu@184.105.242.130:/tmp/vms/",shell=True)
+    # except:
+    #   self.finish('Internal upload DB error')
+    #   return
     remote_url="http://50.227.54.146:15010/static_content/"+relative_path
     self.finish(cname + " is uploaded! Check url >> %s" %remote_url)
 
@@ -352,15 +394,51 @@ class DeleteFileHandler(BaseHandler):
     try:
       user_res=self.user_contents_db.update_one({"user_name":user_name},
         {"$pull":
-          {file_type:
+          {"assets":
             {"url":file_url}
           }
         })
     except:
       self.finish('Access DB error')
       return
-    os.remove(file_url)
+    if os.path.exists(file_url):
+      os.remove(file_url)
     self.finish("delete success")
+
+@jwtauth
+class DeleteAllHandler(BaseHandler):
+  def post(self):
+    user_name_dict=my_auth.extract_user(self.request)
+    if isinstance(user_name_dict, str):
+      self.finish(user_name_dict)
+      return
+    user_name=user_name_dict['user_name']
+    try:
+      print "in side deletting"
+      user_res=self.user_contents_db.update_one({"user_name":user_name},
+        {"$set":
+          {"assets":
+            []
+          }
+        })
+      user_res=self.user_contents_db.update_one({"user_name":user_name},
+        {"$set":
+          {"images":
+            []
+          }
+        })
+      user_res=self.user_contents_db.update_one({"user_name":user_name},
+        {"$set":
+          {"videos":
+            []
+          }
+        })
+      print "after deletting"
+    except:
+      self.finish('Access DB error')
+      return
+    self.finish("delete success")
+
 
 
 send_data=my_util.get_refresh()
@@ -429,9 +507,37 @@ class FCHandler(BaseHandler):
     print data
 
 class RefreshHandler(BaseHandler):
-  def get(self):
-    self.write(json.dumps(my_util.get_refresh()))
+   def get(self):
+     self.write(json.dumps(my_util.get_refresh()))
+ 
+class CommentsHandler(BaseHandler):
+   def get(self):
+     self.write(json.dumps(my_util.get_comments()))
 
+@jwtauth
+class LikeHandler(BaseHandler):
+   def post(self):
+      user_name_dict=my_auth.extract_user(self.request)
+      if isinstance(user_name_dict, str):
+        self.finish(user_name_dict)
+        return
+      user_name=user_name_dict['user_name']
+      try:
+        form_data = tornado.escape.json_decode(self.request.body)
+        like_file_id=form_data['file_id']
+      except:
+        self.write(error_response("Invalid Form data format, only support JSON\n"))
+        return
+      self.user_contents_db.update_one({"user_name":user_name},
+        {"$set":
+          {"likes."+like_file_id : true,
+          }
+      })
+      self.write(success_response("like success"))
+
+
+     
+ 
 
 class MoreHandler(BaseHandler):
   def get(self):
@@ -441,25 +547,121 @@ class MoreHandler(BaseHandler):
 #     (r"/", MainHandler),
 #   ])
 
+class AvatarHandler(BaseHandler):
+  def get(self):
+    avatar = Avatar.generate(128, "haha")
+    f_path=__UPLOADS__ + '/test-ava.jpg'
+    with open(f_path, 'w+') as fh:
+        fh.write(avatar)
+    # headers = { 'Content-Type': 'image/png' }
+    self.write("http://50.227.54.146:15010/static_content/test-ava.jpg")
 
 class AssetUploadHandler(BaseHandler):
   def post(self):
+    print "receive asset upload"
+    print datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
     try:
       form_data = tornado.escape.json_decode(self.request.body)
     except:
+      print "Invalid Form data format, only support JSON\n"
       self.write(error_response("Invalid Form data format, only support JSON\n"))
+    user_name_dict=my_auth.extract_user(self.request)
+    if isinstance(user_name_dict, str):
+      self.finish(user_name_dict)
+      return
+    user_name=user_name_dict['user_name']
+    # try:
+    b64_imgstr=form_data['data']
+    file_id= user_name+'*'+str(uuid.uuid4())
+    fname =  file_id + '.jpg'
+    f_path=__UPLOADS__ + 'user_contents/'+user_name+'/images/'
+    if not os.path.exists(f_path):
+      os.makedirs(f_path)
+    f_url=f_path+fname
+    relative_path='user_contents/'+user_name+'/images/'+fname
+    with open(f_url,'w+') as upf:
+      upf.write(base64.b64decode(b64_imgstr))
+    original_pic_url = "http://50.227.54.146:15010/static_content/"+relative_path
+    contents=self.user_contents_db.find_one({"user_name":user_name})
+    self.user_contents_db.update_one({"user_name":user_name},
+      {"$push":
+        {"assets":
+          { "url":f_url, 
+            "avatar": contents['avatar'],
+            "file_id":file_id,
+            "created_at":datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "tag":[],
+            "person_id":[],
+            "text": "",
+            "original_pic": original_pic_url,
+            "original_video": "",
+            "zipcode": ""
+            }
+        }
+      })
+    # except:
+      # self.write(error_response('Internal upload DB error'))
+      # return
+    self.write(success_response({'resp': " file is uploaded! Check url >> %s" %original_pic_url }))
+
+
+@jwtauth
+class VideoUploadHandler(BaseHandler):
+  def post(self):
+    print "receive video asset upload"
+    print datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     try:
-      b64_imgstr=form_data['data']
-      filename=str(uuid.uuid4())+'.png'
-      with open(__UPLOADS__+filename,'w+') as upf:
-        upf.write(base64.b64decode(b64_imgstr))
+      video_data = self.request.body
+      print "got request body"
     except:
-      self.write(error_response('Internal upload DB error'))
+      print "error in reading request body\n"
+      self.write(error_response("error in reading request body\n"))
+    print "before token"
+    print self.request.headers
+    user_name_dict=my_auth.extract_user(self.request)
+    if isinstance(user_name_dict, str):
+      print user_name_dict
+      self.finish(user_name_dict)
       return
-    remote_url="http://50.227.54.146:15010/static_content/"+filename
-    self.write(success_response({'resp': " file is uploaded! Check url >> %s" %remote_url}))
-
+    user_name=user_name_dict['user_name']
+    # try:
+    file_id= user_name+'*'+str(uuid.uuid4())
+    fname =  file_id + '.mov'
+    f_path=__UPLOADS__ + 'user_contents/'+user_name+'/videos/'
+    if not os.path.exists(f_path):
+      os.makedirs(f_path)
+    f_url=f_path+fname
+    relative_path='user_contents/'+user_name+'/videos/'+fname
+    print f_url
+    with open(f_url,'w+') as upf:
+      upf.write(video_data)
+    print "after writing"
+    original_video_url = "http://50.227.54.146:15010/static_content/"+relative_path
+    contents=self.user_contents_db.find_one({"user_name":user_name})
+    self.user_contents_db.update_one({"user_name":user_name},
+      {"$push":
+        {"assets":
+          { "url":f_url, 
+            "avatar": contents['avatar'],
+            "file_id":file_id,
+            "created_at":datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "tag":[],
+            "person_id":[],
+            "text": "",
+            "original_pic": "",
+            "original_video": original_video_url,
+            "zipcode": ""
+            }
+        }
+      })
+    print "after DB insert"
+    subprocess.call("scp -P 1122 "+f_url+" ubuntu@184.105.242.130:/tmp/vms/",shell=True)
+    # except:
+      # self.write(error_response('Internal upload DB error'))
+      # return
+    self.write(success_response({'resp': " file is uploaded! Check url >> %s" %original_video_url }))
 
 class TestHandler(BaseHandler):
   def get(self):
@@ -480,16 +682,11 @@ class SetCoverHandler(BaseHandler):
       print "get set cover request"
       fileinfo = self.request.files['file'][0]
       fname = self.request.headers.get('cover_image_name')
-
-      print "filename:"
-      print fname
       file_id,extn = os.path.splitext(fname)
       star_idx=fname.rfind('*')
       user_name=fname[0:star_idx]
       file_type="cover_images"
       f_path=__UPLOADS__ + 'user_contents/'+user_name+'/'+file_type+'/'
-      print "username:"
-      print user_name
       if not os.path.exists(f_path):
         os.makedirs(f_path)
       f_url=f_path+fname
@@ -499,9 +696,9 @@ class SetCoverHandler(BaseHandler):
       with open(f_url, 'w+') as fh:
         fh.write(fileinfo['body'])
 
-      self.user_contents_db.update_one({"user_name":user_name, "videos.file_id":file_id},
+      self.user_contents_db.update_one({"user_name":user_name, "assets.file_id":file_id},
         {"$set":
-          {"videos.$.original_pic": "http://50.227.54.146:15010/static_content/"+relative_path,
+          {"assets.$.original_pic": "http://50.227.54.146:15010/static_content/"+relative_path,
           }
       })
 

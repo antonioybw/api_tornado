@@ -4,3 +4,4 @@ pip install urllib
 pip install pymongo
 pip install tornado
 pip install pyjwt
+pip install avatar-generator

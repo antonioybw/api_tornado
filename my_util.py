@@ -6,7 +6,7 @@ def get_time_label():
 
 
 #name and avatar pair list
-name_list=["Bowen Yang", "Cheng Ma","Zhebin Yang", "Mike Scott", "Kylie Kuang", "Coco Cao","Tony Hu", "Feco Chen"]
+name_list=["Bowen Yang", "Cheng Ma","Zhebin Yang", "Weixin Wu", "Kylie Kuang", "Coco Cao","Tony Hu", "Feco Chen"]
 img_list=["clipPreview(1)", "clipPreview(2)", "clipPreview(3)", "clipPreview(4)", "clipPreview(5)", "clipPreview(6)", "IMG_3749"]
 zipcode_list=["94089", "95054", "95056", "94086", "91542", "94089", "95054", "95056"]
 
@@ -27,6 +27,32 @@ def get_rand_vid():
   idx=randint(0, vid_list_len-1)
   return "http://50.227.54.146:15010/static_content/random_vid/"+vid_list[idx]+".mp4"
 
+def get_comments():
+  comments={
+    "err_code": 0,
+    "err_msg": "success",
+    "data": [
+        {
+            "avatar":"1",
+            "name":"Bowen Yang",
+            "text":"wow that's some serious chat action",
+            "time":"1404705240"
+        },
+        {
+            "avatar":"2",
+            "name":"Cheng Ma",
+            "text":"what country is covered by your food app?",
+            "time":"1404705260"
+        },
+        {
+            "avatar":"4",
+            "name":"Weixin Wu",
+            "text":"Signed the petition. Hope it's not too late.",
+            "time":"1404705400"
+        }
+    ]
+  }
+  return comments
 
 def get_refresh():
   image_video_list = []
@@ -52,6 +78,7 @@ def get_refresh():
               "original_pic": image_video_list[0][0],
               "original_video": image_video_list[0][1],
               "created_at": get_time_label(),
+              "like_count":26,
               "zipcode": zipcode_list[name_avatar_list[0]]
           },
 
@@ -63,6 +90,7 @@ def get_refresh():
               "original_pic": image_video_list[1][0],
               "original_video": image_video_list[1][1],
               "created_at": get_time_label(),
+              "like_count":0,
               "zipcode": zipcode_list[name_avatar_list[1]]
           },
 
@@ -74,6 +102,7 @@ def get_refresh():
               "original_pic": image_video_list[2][0],
               "original_video": image_video_list[2][1],
               "created_at": get_time_label(),
+              "like_count":1,
               "zipcode": zipcode_list[name_avatar_list[2]]
           },
 
@@ -85,11 +114,13 @@ def get_refresh():
               "original_pic": image_video_list[3][0],
               "original_video": image_video_list[3][1],
               "created_at": get_time_label(),
+              "like_count":10,
               "zipcode": zipcode_list[name_avatar_list[3]]
           }
 
           ]
       }
+
   return refresh_data
 
 

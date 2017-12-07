@@ -132,8 +132,10 @@ def decode_auth_token(auth_token):
         payload = jwt.decode(auth_token, SECRET_KEY)
         return {'user_name':payload['user_name']}
     except jwt.ExpiredSignatureError:
+        print 'Signature expired. Please log in again.'
         return 'Signature expired. Please log in again.'
     except jwt.InvalidTokenError:
+        print 'Invalid token. Please log in again.'
         return 'Invalid token. Please log in again.'
 
 def extract_user(request):

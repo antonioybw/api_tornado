@@ -17,6 +17,7 @@ import my_util
 import time 
 import base64
 import subprocess
+from dateutil.parser import parse
 
 from avatar_generator import Avatar
 
@@ -24,6 +25,9 @@ from my_util import error_response
 from my_util import success_response
 
 from tornado.options import define, options
+import sys
+sys.path.append('./handler')
+# from CommunityHandler import CommunityHandler 
 
 define("port", default=15010, help="run on the given port", type=int)
 define("mongodb", default="184.105.242.130:19777", help="mongodb database ip and port")
@@ -35,9 +39,19 @@ executor = concurrent.futures.ThreadPoolExecutor()
 #debug flag
 DEBUG = options.debug
 
-
-
+#upload server path prefix
 __UPLOADS__ = "/root/workspace/webapp_tornado/static/"
+
+#load top 20 closest zipcode file
+top20_dict={}
+with open('./src/top20_list.txt','r') as ziplist:
+  zip_array=ziplist.read().splitlines()
+  for eachline in zip_array:
+    line_array=eachline.split(':')
+    key_zip=line_array[0]
+    value_list=line_array[1].split(',')
+    top20_dict[key_zip]=value_list
+
 
 
 class Application(tornado.web.Application):
@@ -60,6 +74,7 @@ class Application(tornado.web.Application):
       (r"/comments", CommentsHandler),
       (r"/more", MoreHandler),
       (r"/user_contents", UserContentsHandler),
+      (r"/community", CommunityHandler),
       (r"/delete", DeleteFileHandler),
       (r"/delete_all", DeleteAllHandler),
       (r"/api/v1/read_db/?", DBHandler),
@@ -79,6 +94,7 @@ class Application(tornado.web.Application):
     self.user_db= self.user_db_client.user_db
     self.user_account=self.user_db.user_account
     self.user_contents=self.user_db.user_contents
+    self.zip_to_user=self.user_db.zip_to_user
 
 class BaseHandler(tornado.web.RequestHandler):
   @property
@@ -87,6 +103,9 @@ class BaseHandler(tornado.web.RequestHandler):
   @property
   def user_contents_db(self):
     return self.application.user_contents
+  @property
+  def zip_to_user_db(self):
+    return self.application.zip_to_user
 
   def get_current_user(self):
     return self.get_secure_cookie("user")
@@ -171,6 +190,8 @@ class LoginHandler(BaseHandler):
         response['user_name']=user_account_db_data['user_name']
         response['email']=user_account_db_data['email']
         response['avatar']=ava_url
+        if 'zipcode' in user_account_db_data :
+          response['user_zipcode']=user_account_db_data["zipcode"] 
         # time.sleep(5)
         self.write(success_response(response))
       else:
@@ -217,34 +238,41 @@ class RegisterHandler(BaseHandler):
       return
 
     ## create user contents block
-    try:
-      avatar = Avatar.generate(128, form_data['user_name'])
-      create_path=__UPLOADS__ + 'user_contents/'+form_data['user_name']+'/avatar/'
-      if not os.path.exists(create_path):
-        os.makedirs(create_path)
-      ava_relative_path='user_contents/'+form_data['user_name']+'/avatar/'+form_data['user_name']+'_avatar.jpg'
-      ava_path=__UPLOADS__ + ava_relative_path
-      with open(ava_path, 'w+') as fh:
-          fh.write(avatar)
-      #prepare three list db create
-      ava_url="http://50.227.54.146:15010/static_content/"+ava_relative_path
-      new_face_list={
-        "user_name"           : form_data['user_name'],
-        "avatar"              : ava_url,
-        "assets"              : [],
-        "videos"              : [],
-        "images"              : [],
-        "white_list"          : [],
-        "black_list"          : [],
-        "unknown_list"        : [],
-        "user_FC_collection"  : form_data['user_FC_collection'],
-        "like_list"           : {}
-      }
-      self.user_contents_db.insert_one(new_face_list)
-    except:
-      print "error in user_to_face insert"
-      self.write(error_response("Error in register to DB"))
-      return
+    # try:
+    avatar = Avatar.generate(128, form_data['user_name'])
+    create_path=__UPLOADS__ + 'user_contents/'+form_data['user_name']+'/avatar/'
+    if not os.path.exists(create_path):
+      os.makedirs(create_path)
+    ava_relative_path='user_contents/'+form_data['user_name']+'/avatar/'+form_data['user_name']+'_avatar.jpg'
+    ava_path=__UPLOADS__ + ava_relative_path
+    with open(ava_path, 'w+') as fh:
+        fh.write(avatar)
+    #prepare three list db create
+    ava_url="http://50.227.54.146:15010/static_content/"+ava_relative_path
+    new_face_list={
+      "user_name"           : form_data['user_name'],
+      "avatar"              : ava_url,
+      "zipcode"             : form_data["zipcode"],
+      "assets"              : [],
+      "videos"              : [],
+      "images"              : [],
+      "white_list"          : [],
+      "black_list"          : [],
+      "unknown_list"        : [],
+      "user_FC_collection"  : form_data['user_FC_collection'],
+      "like_list"           : {}
+    }
+    self.user_contents_db.insert_one(new_face_list)
+    self.zip_to_user_db.update_one(
+        { "zipcode":form_data["zipcode"]},
+        { "$push": { "user_name": form_data['user_name'] } },
+        upsert=True)
+      # the last true means upsert for pymongo
+      # above zip_to_user builds user list for each zip code
+    # except:
+    #   print "error in user_to_face insert"
+    #   self.write(error_response("Error in register to DB"))
+    #   return
 
     #prepare http api response
     response={}
@@ -255,6 +283,7 @@ class RegisterHandler(BaseHandler):
       response['user_name']=form_data['user_name']
       response['email']=form_data['email']
       response['avatar']=ava_url
+      response['user_zipcode']=form_data["zipcode"]
       self.write(success_response(response))
     else:
       self.write(error_response("Internal Server Error"))
@@ -328,7 +357,7 @@ class UploadHandler(BaseHandler):
       original_video_url = "http://50.227.54.146:15010/static_content/"+relative_path
 
     contents=self.user_contents_db.find_one({"user_name":user_name})
-    
+    zipcode_value = "" if 'zipcode' not in contents else contents['zipcode']
     self.user_contents_db.update_one({"user_name":user_name},
       {"$push":
         {"assets":
@@ -341,12 +370,14 @@ class UploadHandler(BaseHandler):
             "text": "",
             "original_pic": original_pic_url,
             "original_video": original_video_url,
-            "zipcode": ""
+            "zipcode": zipcode_value,
+            "nickname": user_name,
+            "user_name": user_name
             }
         }
       })
     if file_type=="videos":
-      subprocess.call("scp -P 1122 "+f_url+" ubuntu@184.105.242.130:/tmp/vms/",shell=True)
+      subprocess.call("rsync -av -e 'ssh -o ConnectTimeout=2 -p 1122' "+ f_url+" ubuntu@184.105.242.130:/tmp/vms/",shell=True)
     # except:
     #   self.finish('Internal upload DB error')
     #   return
@@ -556,6 +587,7 @@ class AvatarHandler(BaseHandler):
     # headers = { 'Content-Type': 'image/png' }
     self.write("http://50.227.54.146:15010/static_content/test-ava.jpg")
 
+@jwtauth
 class AssetUploadHandler(BaseHandler):
   def post(self):
     print "receive asset upload"
@@ -584,6 +616,7 @@ class AssetUploadHandler(BaseHandler):
       upf.write(base64.b64decode(b64_imgstr))
     original_pic_url = "http://50.227.54.146:15010/static_content/"+relative_path
     contents=self.user_contents_db.find_one({"user_name":user_name})
+    zipcode_value = "" if 'zipcode' not in contents else contents['zipcode']
     self.user_contents_db.update_one({"user_name":user_name},
       {"$push":
         {"assets":
@@ -596,7 +629,9 @@ class AssetUploadHandler(BaseHandler):
             "text": "",
             "original_pic": original_pic_url,
             "original_video": "",
-            "zipcode": ""
+            "zipcode": zipcode_value,
+            "nickname": user_name,
+            "user_name": user_name
             }
         }
       })
@@ -626,41 +661,45 @@ class VideoUploadHandler(BaseHandler):
       self.finish(user_name_dict)
       return
     user_name=user_name_dict['user_name']
-    # try:
-    file_id= user_name+'*'+str(uuid.uuid4())
-    fname =  file_id + '.mov'
-    f_path=__UPLOADS__ + 'user_contents/'+user_name+'/videos/'
-    if not os.path.exists(f_path):
-      os.makedirs(f_path)
-    f_url=f_path+fname
-    relative_path='user_contents/'+user_name+'/videos/'+fname
-    print f_url
-    with open(f_url,'w+') as upf:
-      upf.write(video_data)
-    print "after writing"
-    original_video_url = "http://50.227.54.146:15010/static_content/"+relative_path
-    contents=self.user_contents_db.find_one({"user_name":user_name})
-    self.user_contents_db.update_one({"user_name":user_name},
-      {"$push":
-        {"assets":
-          { "url":f_url, 
-            "avatar": contents['avatar'],
-            "file_id":file_id,
-            "created_at":datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "tag":[],
-            "person_id":[],
-            "text": "",
-            "original_pic": "",
-            "original_video": original_video_url,
-            "zipcode": ""
-            }
-        }
-      })
-    print "after DB insert"
-    subprocess.call("scp -P 1122 "+f_url+" ubuntu@184.105.242.130:/tmp/vms/",shell=True)
-    # except:
-      # self.write(error_response('Internal upload DB error'))
-      # return
+    try:
+      file_id= user_name+'*'+str(uuid.uuid4())
+      fname =  file_id + '.mov'
+      f_path=__UPLOADS__ + 'user_contents/'+user_name+'/videos/'
+      if not os.path.exists(f_path):
+        os.makedirs(f_path)
+      f_mov_url=f_path+fname
+      f_url=f_path+file_id+'.mp4'
+      relative_path='user_contents/'+user_name+'/videos/'+file_id+'.mp4'
+      with open(f_mov_url,'w+') as upf:
+        upf.write(video_data)
+      print "after writing"
+      subprocess.call('ffmpeg -i '+f_mov_url+' '+f_url, shell=True)
+      original_video_url = "http://50.227.54.146:15010/static_content/"+relative_path
+      contents=self.user_contents_db.find_one({"user_name":user_name})
+      zipcode_value = "" if 'zipcode' not in contents else contents['zipcode']
+      self.user_contents_db.update_one({"user_name":user_name},
+        {"$push":
+          {"assets":
+            { "url":f_url, 
+              "avatar": contents['avatar'],
+              "file_id":file_id,
+              "created_at":datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+              "tag":[],
+              "person_id":[],
+              "text": "",
+              "original_pic": "",
+              "original_video": original_video_url,
+              "zipcode": zipcode_value,
+              "nickname": user_name,
+              "user_name": user_name
+              }
+          }
+        })
+      print "after DB insert"
+      subprocess.call("rsync -av -e 'ssh -o ConnectTimeout=2 -p 1122' "+ f_url+" ubuntu@184.105.242.130:/tmp/vms/",shell=True)
+    except:
+      self.write(error_response('Internal upload DB error'))
+      return
     self.write(success_response({'resp': " file is uploaded! Check url >> %s" %original_video_url }))
 
 class TestHandler(BaseHandler):
@@ -708,6 +747,106 @@ class SetCoverHandler(BaseHandler):
       return
     remote_url="http://50.227.54.146:15010/static_content/"+relative_path
     self.finish(success_response("Cover image is uploaded! Check url >> %s" %remote_url))
+
+
+class CommunityHandler(BaseHandler):
+  # def get(self):
+  #   self.write(top20_dict['95054'][0])
+  def post(self):
+    ### Validate data format
+    try:
+      form_data = tornado.escape.json_decode(self.request.body)
+    except:
+      self.write(error_response("Invalid Form data format, only support JSON\n"))
+      return
+    try:
+      target_zipcode=form_data['zipcode']
+      if(not target_zipcode in top20_dict):
+        self.write(success_response([]))
+        return
+      top20_list=top20_dict[target_zipcode][:]
+      print "got top 20 list"
+      print top20_list
+      top20_list.append(target_zipcode)
+      print "after append self"
+      print top20_list
+      around_users_list=[]
+      
+      for each_zip in top20_list:
+        print each_zip+" ",
+        each_zip_users=self.zip_to_user_db.find_one({'zipcode':each_zip})
+        if each_zip_users==None:
+          continue
+        else:
+          around_users_list.extend(each_zip_users['user_name'])
+      print ""
+      around_users_list=list(set(around_users_list))
+      print "now around users list:"
+      print around_users_list
+      if('user_name' in form_data ):
+        print "got user name:"
+        print form_data['user_name']
+        if(form_data['user_name'] in around_users_list):
+          around_users_list.remove(form_data['user_name'])
+        print "after remove"
+      print "got all users in these zip code"
+      print around_users_list
+      if len(around_users_list)<=0:
+        self.write(success_response([]))
+        return
+      user_assets_data_list=[]
+      for each_user in around_users_list:
+        print each_user
+        user_res=self.user_contents_db.find_one({"user_name":each_user})
+        if user_res==None:
+          continue
+        print "there's assets"
+        user_assets_data_list.append(user_res['assets'][::-1])
+      return_collection=[]
+      reach_end_idx=[]
+      cur_collected_num=0
+      cur_outer_idx=0
+      cur_inner_idx=0
+      timeout = time.time() + 3   # 3 seconds from now
+      while cur_collected_num< 50:
+        ## if this loop runs for too long ,break
+        if time.time() > timeout:
+          break
+
+        ## if all inner list reach end / empty, then break
+        if(len(reach_end_idx)>=len(user_assets_data_list)):
+          break
+
+        ## if the outer loop reach end, start over, increase inner idx
+        if(cur_outer_idx>=len(user_assets_data_list)):
+          cur_outer_idx=0
+          cur_inner_idx+=1
+
+        ## if current user assets reach end, go to next user assets
+        if(cur_outer_idx in reach_end_idx):
+          cur_outer_idx+=1
+          continue
+
+        ## outer_idx is good then get it, loop to next out idxx
+        one_user_assets=user_assets_data_list[cur_outer_idx]
+
+        # if current index exceed limit, record it
+        if(cur_inner_idx >= len(one_user_assets)):
+          reach_end_idx.append(cur_outer_idx)
+          cur_outer_idx+=1
+          continue
+
+        return_collection.append(one_user_assets[cur_inner_idx])
+        cur_collected_num+=1
+        cur_outer_idx+=1
+      return_collection.sort(key=lambda x:parse(x['created_at']), reverse=True)
+    except:
+      self.write(error_response('Access DB error'))
+      return
+    self.write(success_response(return_collection))
+    
+    # for each_zip in top20_list:
+
 
 
 

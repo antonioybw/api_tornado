@@ -35,7 +35,7 @@ def get_comments():
         {
             "avatar":"1",
             "name":"Bowen Yang",
-            "text":"wow that's some serious chat action",
+            "text":"wow that's some serious comment action",
             "time":"1404705240"
         },
         {

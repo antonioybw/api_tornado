@@ -67,6 +67,7 @@ class Application(tornado.web.Application):
       (r"/upload", UploadHandler),
       (r"/test", TestHandler),
       (r"/setCover", SetCoverHandler),
+      (r"/detectedFace", DetectedFaceHandler),
       (r"/asset_upload", AssetUploadHandler),
       (r"/video_upload", VideoUploadHandler),
       (r"/display", FCHandler),
@@ -631,7 +632,8 @@ class AssetUploadHandler(BaseHandler):
             "original_video": "",
             "zipcode": zipcode_value,
             "nickname": user_name,
-            "user_name": user_name
+            "user_name": user_name,
+            "detected_face":""
             }
         }
       })
@@ -687,11 +689,12 @@ class VideoUploadHandler(BaseHandler):
               "tag":[],
               "person_id":[],
               "text": "",
-              "original_pic": "",
+              "original_pic": "http://50.227.54.146:15010/static_content/app_img/stay-tuned.jpg",
               "original_video": original_video_url,
               "zipcode": zipcode_value,
               "nickname": user_name,
-              "user_name": user_name
+              "user_name": user_name,
+              "detected_face":""
               }
           }
         })
@@ -747,6 +750,39 @@ class SetCoverHandler(BaseHandler):
       return
     remote_url="http://50.227.54.146:15010/static_content/"+relative_path
     self.finish(success_response("Cover image is uploaded! Check url >> %s" %remote_url))
+
+class DetectedFaceHandler(BaseHandler):
+  def post(self):
+    try:
+      print "get set detected face request"
+      fileinfo = self.request.files['file'][0]
+      fname = self.request.headers.get('detected_face_image_name')
+      file_id,extn = os.path.splitext(fname)
+      star_idx=fname.rfind('*')
+      user_name=fname[0:star_idx]
+      file_type="detected_face"
+      f_path=__UPLOADS__ + 'user_contents/'+user_name+'/'+file_type+'/'
+      if not os.path.exists(f_path):
+        os.makedirs(f_path)
+      f_url=f_path+fname
+      print "after create path:"
+
+      relative_path='user_contents/'+user_name+'/'+file_type+'/'+fname
+      with open(f_url, 'w+') as fh:
+        fh.write(fileinfo['body'])
+
+      self.user_contents_db.update_one({"user_name":user_name, "assets.file_id":file_id},
+        {"$set":
+          {"assets.$.detected_face": "http://50.227.54.146:15010/static_content/"+relative_path,
+          }
+      })
+
+      print "settting db"
+    except:
+      self.finish('Internal upload DB error')
+      return
+    remote_url="http://50.227.54.146:15010/static_content/"+relative_path
+    self.finish(success_response("Detected Face image is uploaded! Check url >> %s" %remote_url))
 
 
 class CommunityHandler(BaseHandler):

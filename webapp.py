@@ -76,6 +76,7 @@ class Application(tornado.web.Application):
       (r"/more", MoreHandler),
       (r"/user_contents", UserContentsHandler),
       (r"/community", CommunityHandler),
+      (r"/like",LikeHandler),
       (r"/delete", DeleteFileHandler),
       (r"/delete_all", DeleteAllHandler),
       (r"/api/v1/read_db/?", DBHandler),
@@ -96,6 +97,7 @@ class Application(tornado.web.Application):
     self.user_account=self.user_db.user_account
     self.user_contents=self.user_db.user_contents
     self.zip_to_user=self.user_db.zip_to_user
+    self.user_like_list=self.user_db.user_like_list
 
 class BaseHandler(tornado.web.RequestHandler):
   @property
@@ -107,6 +109,9 @@ class BaseHandler(tornado.web.RequestHandler):
   @property
   def zip_to_user_db(self):
     return self.application.zip_to_user
+  @property
+  def user_like_list_db(self):
+    return self.application.user_like_list
 
   def get_current_user(self):
     return self.get_secure_cookie("user")
@@ -260,8 +265,7 @@ class RegisterHandler(BaseHandler):
       "white_list"          : [],
       "black_list"          : [],
       "unknown_list"        : [],
-      "user_FC_collection"  : form_data['user_FC_collection'],
-      "like_list"           : {}
+      "user_FC_collection"  : form_data['user_FC_collection']
     }
     self.user_contents_db.insert_one(new_face_list)
     self.zip_to_user_db.update_one(
@@ -557,14 +561,33 @@ class LikeHandler(BaseHandler):
       try:
         form_data = tornado.escape.json_decode(self.request.body)
         like_file_id=form_data['file_id']
+        like_updated_status=form_data['like_status']
+        print "request content:"
+        print form_data
       except:
         self.write(error_response("Invalid Form data format, only support JSON\n"))
         return
-      self.user_contents_db.update_one({"user_name":user_name},
-        {"$set":
-          {"likes."+like_file_id : true,
-          }
-      })
+      try:
+        if like_updated_status:
+          self.user_like_list_db.update_one(
+            {"user_name":user_name},
+            {"$addToSet":
+              {"like_list": like_file_id}
+            },
+            upsert=True)
+        # addToSet only push if not exist
+          print "push to like list"
+
+        else:
+          self.user_like_list_db.update_one(
+            {"user_name":user_name},
+            {"$pull":
+              {"like_list": like_file_id}
+            })
+          print "delete from  like list"
+      except:
+        self.write(error_response("Internal Server DB error\n"))
+        return
       self.write(success_response("like success"))
 
 
@@ -599,6 +622,15 @@ class AssetUploadHandler(BaseHandler):
     except:
       print "Invalid Form data format, only support JSON\n"
       self.write(error_response("Invalid Form data format, only support JSON\n"))
+
+
+    # TODO : WW: remove this part
+    des_msg=""
+    try: 
+      des_msg=form_data['Descriptionmsg']
+    except:
+      pass
+
     user_name_dict=my_auth.extract_user(self.request)
     if isinstance(user_name_dict, str):
       self.finish(user_name_dict)
@@ -633,7 +665,8 @@ class AssetUploadHandler(BaseHandler):
             "zipcode": zipcode_value,
             "nickname": user_name,
             "user_name": user_name,
-            "detected_face":""
+            "detected_face":"",
+            "text":des_msg
             }
         }
       })
@@ -655,6 +688,16 @@ class VideoUploadHandler(BaseHandler):
     except:
       print "error in reading request body\n"
       self.write(error_response("error in reading request body\n"))
+
+    # TODO : WW: remove this part
+    des_msg=""
+    try: 
+      des_msg=self.request.headers.get('Descriptionmsg')
+      print "got Descriptionmsg here"
+      print des_msg
+    except:
+      pass
+
     print "before token"
     print self.request.headers
     user_name_dict=my_auth.extract_user(self.request)
@@ -694,7 +737,8 @@ class VideoUploadHandler(BaseHandler):
               "zipcode": zipcode_value,
               "nickname": user_name,
               "user_name": user_name,
-              "detected_face":""
+              "detected_face":"",
+              "text":des_msg
               }
           }
         })
@@ -879,6 +923,27 @@ class CommunityHandler(BaseHandler):
     except:
       self.write(error_response('Access DB error'))
       return
+
+    try:
+      user_name_dict=my_auth.extract_user(self.request)
+      user_name=user_name_dict['user_name']
+      print "user_name is"
+      print user_name
+      like_list=self.user_like_list_db.find_one({'user_name':user_name})['like_list']
+      print "like_list :"
+      print like_list
+      for each_asset in return_collection:
+        if(like_list==None):
+          each_asset['like_status']=False
+          continue
+        if(each_asset['file_id'] in like_list):
+          each_asset['like_status']=True
+        else:
+          each_asset['like_status']=False
+      
+    except:
+      print "error in giving like"
+      pass
     self.write(success_response(return_collection))
     
     # for each_zip in top20_list:

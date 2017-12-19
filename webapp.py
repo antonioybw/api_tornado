@@ -73,6 +73,8 @@ class Application(tornado.web.Application):
       (r"/display", FCHandler),
       (r"/refresh", RefreshHandler),
       (r"/comments", CommentsHandler),
+      (r"/get_comments",GetCommentsHandler),
+      (r"/post_comment", PostCommentHandler),
       (r"/more", MoreHandler),
       (r"/user_contents", UserContentsHandler),
       (r"/community", CommunityHandler),
@@ -98,6 +100,8 @@ class Application(tornado.web.Application):
     self.user_contents=self.user_db.user_contents
     self.zip_to_user=self.user_db.zip_to_user
     self.user_like_list=self.user_db.user_like_list
+    self.tweet_comments_list=self.user_db.tweet_comments_list
+    self.comments_text=self.user_db.comments_text
 
 class BaseHandler(tornado.web.RequestHandler):
   @property
@@ -112,6 +116,13 @@ class BaseHandler(tornado.web.RequestHandler):
   @property
   def user_like_list_db(self):
     return self.application.user_like_list
+  @property
+  def tweet_comments_list_db(self):
+    return self.application.tweet_comments_list
+  @property
+  def comments_text_db(self):
+    return self.application.comments_text
+
 
   def get_current_user(self):
     return self.get_secure_cookie("user")
@@ -550,6 +561,33 @@ class CommentsHandler(BaseHandler):
    def get(self):
      self.write(json.dumps(my_util.get_comments()))
 
+class GetCommentsHandler(BaseHandler):
+  def post(self):
+    try:
+      form_data = tornado.escape.json_decode(self.request.body)
+      file_id=form_data['file_id']
+    except:
+      self.write(error_response("Invalid Form data format, only support JSON\n"))
+      return
+
+    try:
+
+      comments_doc=self.tweet_comments_list_db.find_one({"file_id":file_id})
+      if(comments_doc==None):
+        self.write(success_response([]))
+        return
+      else:
+        comments_id_list=comments_doc['comments_list']
+      comments_data=[]
+      for c_id in comments_id_list:
+        comments_data.append(self.comments_text_db.find_one({"comment_id":c_id })['comment_data'])
+
+    except:
+      self.write(error_response("Accessing DB error\n"))
+      return
+    self.write(success_response(comments_data))
+
+
 @jwtauth
 class LikeHandler(BaseHandler):
    def post(self):
@@ -590,7 +628,43 @@ class LikeHandler(BaseHandler):
         return
       self.write(success_response("like success"))
 
-
+@jwtauth
+class PostCommentHandler(BaseHandler):
+   def post(self):
+      user_name_dict=my_auth.extract_user(self.request)
+      if isinstance(user_name_dict, str):
+        self.finish(user_name_dict)
+        return
+      user_name=user_name_dict['user_name']
+      try:
+        form_data = tornado.escape.json_decode(self.request.body)
+        comment_file_id=form_data['file_id']
+        comment_text=form_data['comment_text']
+        user_avatar_url=form_data['user_avatar_url']
+      except:
+        self.write(error_response("Invalid Form data format, only support JSON\n"))
+        return
+      try:
+        comment_id=str(uuid.uuid4())
+        comment_data={}
+        comment_data['file_id']=comment_file_id
+        comment_data['user']=user_name
+        comment_data['user_avatar_url']=user_avatar_url
+        comment_data['text']=comment_text
+        comment_data['time']=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.tweet_comments_list_db.update_one(
+          {"file_id":comment_file_id},
+          {"$addToSet":
+            {"comments_list": comment_id}
+          },
+          upsert=True)
+          # addToSet only push if not exist
+        # add one entry in the comments db
+        self.comments_text_db.insert({"comment_id":comment_id, "comment_data":comment_data})
+      except:
+        self.write(error_response("Internal Server DB error\n"))
+        return
+      self.write(success_response({'comment_time': comment_data['time']}))
      
  
 

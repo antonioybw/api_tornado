@@ -1,7 +1,7 @@
 import tornado.ioloop
 import tornado.web
 import pymongo
-from pymongo import MongoClient
+from pymongo import MongoClient, InsertOne, DeleteMany, ReplaceOne, UpdateOne
 import urllib
 import tornado.escape
 import bcrypt
@@ -18,6 +18,7 @@ import time
 import base64
 import subprocess
 from dateutil.parser import parse
+from pprint import pprint
 
 from avatar_generator import Avatar
 
@@ -75,8 +76,10 @@ class Application(tornado.web.Application):
       (r"/comments", CommentsHandler),
       (r"/get_comments",GetCommentsHandler),
       (r"/post_comment", PostCommentHandler),
+      (r"/facetag", FacetagHandler),
       (r"/more", MoreHandler),
       (r"/user_contents", UserContentsHandler),
+      (r"/public", PublicHandler),
       (r"/community", CommunityHandler),
       (r"/like",LikeHandler),
       (r"/delete", DeleteFileHandler),
@@ -102,6 +105,7 @@ class Application(tornado.web.Application):
     self.user_like_list=self.user_db.user_like_list
     self.tweet_comments_list=self.user_db.tweet_comments_list
     self.comments_text=self.user_db.comments_text
+    self.face_collection=self.user_db.face_collection
 
 class BaseHandler(tornado.web.RequestHandler):
   @property
@@ -122,6 +126,9 @@ class BaseHandler(tornado.web.RequestHandler):
   @property
   def comments_text_db(self):
     return self.application.comments_text
+  @property
+  def face_collection_db(self):
+    return self.application.face_collection
 
 
   def get_current_user(self):
@@ -744,6 +751,7 @@ class AssetUploadHandler(BaseHandler):
             }
         }
       })
+    subprocess.call("rsync -av -e 'ssh -o ConnectTimeout=2 -p 1122' "+ f_url+" ubuntu@184.105.242.130:/tmp/vms/",shell=True)
     # except:
       # self.write(error_response('Internal upload DB error'))
       # return
@@ -836,6 +844,14 @@ class TestHandler(BaseHandler):
     #   return
     self.finish(success_response("success"))
 
+  def post(self):
+    form_data=self.request.body
+    print "form data is:"
+    print self.request.files['key'][0]['body']
+
+
+
+
 class SetCoverHandler(BaseHandler):
   def post(self):
     try:
@@ -873,6 +889,7 @@ class DetectedFaceHandler(BaseHandler):
   def post(self):
     try:
       print "get set detected face request"
+      face_feature = self.request.files['face_feature'][0]['body']
       fileinfo = self.request.files['file'][0]
       fname = self.request.headers.get('detected_face_image_name')
       file_id,extn = os.path.splitext(fname)
@@ -889,11 +906,26 @@ class DetectedFaceHandler(BaseHandler):
       with open(f_url, 'w+') as fh:
         fh.write(fileinfo['body'])
 
-      self.user_contents_db.update_one({"user_name":user_name, "assets.file_id":file_id},
-        {"$set":
-          {"assets.$.detected_face": "http://50.227.54.146:15010/static_content/"+relative_path,
-          }
-      })
+      face_id=str(uuid.uuid4())
+      operations=[
+        UpdateOne({"user_name":user_name, "assets.file_id":file_id},
+          {"$set":{"assets.$.detected_face": "http://50.227.54.146:15010/static_content/"+relative_path} }),
+        UpdateOne({"user_name":user_name, "assets.file_id":file_id},
+          {"$set":{"assets.$.face_id": face_id} }),
+        UpdateOne({"user_name":user_name, "assets.file_id":file_id},
+          {"$set":{"assets.$.face_tag": "unknown"} })
+      ]
+      self.user_contents_db.bulk_write(operations)
+
+      new_face={
+        "face_id"             : face_id,
+        "face_feature"        : face_feature,
+        "source_file_id"      : file_id,
+        "crop_img_url"        : "http://50.227.54.146:15010/static_content/"+relative_path,
+        "related_file_id"     : [file_id],
+        "related_face_id"     : []
+      }
+      self.face_collection_db.insert_one(new_face)
 
       print "settting db"
     except:
@@ -901,6 +933,19 @@ class DetectedFaceHandler(BaseHandler):
       return
     remote_url="http://50.227.54.146:15010/static_content/"+relative_path
     self.finish(success_response("Detected Face image is uploaded! Check url >> %s" %remote_url))
+
+
+class PublicHandler(BaseHandler):
+  def get(self):
+    try:
+      user_res_1=self.user_contents_db.find_one({"user_name":'securitai'})['assets']
+      user_res_2=self.user_contents_db.find_one({"user_name":'InstantKamara'})['assets']
+      user_res_1.extend(user_res_2)
+      user_res_1.sort(key=lambda x:parse(x['created_at']), reverse=True)
+    except:
+      self.write(error_response('Access DB error'))
+      return
+    self.write(success_response(user_res_1))
 
 
 class CommunityHandler(BaseHandler):
@@ -1007,6 +1052,24 @@ class CommunityHandler(BaseHandler):
       print "like_list :"
       print like_list
       for each_asset in return_collection:
+
+        ## TODO, change assign unknown, to comparing face feature list then assign
+        if('face_tag' in each_asset and each_asset['face_tag']!= 'unknown'):
+          each_asset['uploader_face_tag']=each_asset['face_tag']
+
+        if('face_id' in each_asset):
+          user_wlist=self.user_contents_db.find_one({'user_name':user_name})['white_list']
+          user_blist=self.user_contents_db.find_one({'user_name':user_name})['black_list']
+
+          if (each_asset['face_id'] in user_wlist):
+            each_asset['face_tag']='white'
+          elif each_asset['face_id'] in user_blist:
+            each_asset['face_tag']='black'
+          else:
+            each_asset['face_tag']='unknown'
+        else:
+          each_asset['face_tag']='unknown'
+
         if(like_list==None):
           each_asset['like_status']=False
           continue
@@ -1017,12 +1080,68 @@ class CommunityHandler(BaseHandler):
       
     except:
       print "error in giving like"
+      for each_asset in return_collection:
+        each_asset['face_tag']='unknown'
       pass
     self.write(success_response(return_collection))
     
     # for each_zip in top20_list:
 
 
+@jwtauth
+class FacetagHandler(BaseHandler):
+  def post(self):
+    try:
+      form_data = tornado.escape.json_decode(self.request.body)
+    except:
+      self.write(error_response("Invalid Form data format, only support JSON\n"))
+      return
+    user_name_dict=my_auth.extract_user(self.request)
+    if isinstance(user_name_dict, str):
+      self.finish(user_name_dict)
+      return
+    user_name=user_name_dict['user_name']
+    file_id = form_data['file_id']
+    facetag = form_data['facetag']
+    face_id = self.face_collection_db.find_one({'source_file_id':file_id})['face_id']
+    if(face_id ==None):
+      self.write(error_response("Cannot find face for the file"))
+      return
+
+    if(facetag=="blacklist"):
+      b_op=[
+        UpdateOne( {'user_name':user_name}, { "$push":{'black_list': face_id} }     ),
+        UpdateOne( {'user_name':user_name}, { "$pull":{'white_list': face_id} }     ),
+        UpdateOne( {'user_name':user_name}, { "$pull":{'unknown_list': face_id}}    ),
+        UpdateOne( {'user_name':user_name, "assets.file_id":file_id }, { "$set": {'assets.$.face_id':face_id}}   ),
+        UpdateOne( {'user_name':user_name, "assets.file_id":file_id }, { "$set": {'assets.$.face_tag':'black'}}  )
+      ]
+      self.user_contents_db.bulk_write(b_op)
+
+    elif(facetag=="whitelist"):
+
+      w_op=[
+        UpdateOne( {'user_name':user_name}, { "$push":{'white_list': face_id} }     ),
+        UpdateOne( {'user_name':user_name}, { "$pull":{'black_list': face_id} }     ),
+        UpdateOne( {'user_name':user_name}, { "$pull":{'unknown_list': face_id}}    ),
+        UpdateOne( {'user_name':user_name, "assets.file_id":file_id }, { "$set": {'assets.$.face_id':face_id}}   ),
+        UpdateOne( {'user_name':user_name, "assets.file_id":file_id }, { "$set": {'assets.$.face_tag':'white'}}  )
+      ]
+      self.user_contents_db.bulk_write(w_op)
+
+    else:
+
+      u_op=[
+        UpdateOne( {'user_name':user_name}, { "$push":{'unknown_list': face_id} }     ),
+        UpdateOne( {'user_name':user_name}, { "$pull":{'white_list': face_id} }     ),
+        UpdateOne( {'user_name':user_name}, { "$pull":{'black_list': face_id}}    ),
+        UpdateOne( {'user_name':user_name, "assets.file_id":file_id }, { "$set": {'assets.$.face_id':face_id}}   ),
+        UpdateOne( {'user_name':user_name, "assets.file_id":file_id }, { "$set": {'assets.$.face_tag':'unknown'}}  )
+      ]
+      self.user_contents_db.bulk_write(u_op)
+
+    self.write(success_response("face tag success"))
+        
 
 
 
